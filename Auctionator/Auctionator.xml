@@ -1150,6 +1150,22 @@
 						</FontString>
 					</Layer>
 				</Layers>
+				<Scripts>
+					<OnClick>
+						Atr_Buy_Chain_OnToggle();
+					</OnClick>
+					<OnEnter>
+						GameTooltip:SetOwner(self, "ANCHOR_RIGHT");
+						GameTooltip:AddLine("Chain buy");
+						GameTooltip:AddLine("Buys the cheapest listings first and keeps going in one click", 1, 1, 1, true);
+						GameTooltip:AddLine("until the amount you enter is bought (leave it blank to buy all),", 1, 1, 1, true);
+						GameTooltip:AddLine("you run out of gold, or there are none left.", 1, 1, 1, true);
+						GameTooltip:Show();
+					</OnEnter>
+					<OnLeave>
+						GameTooltip:Hide();
+					</OnLeave>
+				</Scripts>
 			</CheckButton>
 
 			<Button name="Atr_Buy_Confirm_OKBut" inherits="UIPanelButtonTemplate" text="Buy">

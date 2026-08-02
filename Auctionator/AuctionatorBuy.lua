@@ -28,6 +28,11 @@ local gAtr_Buy_Session_NumBought		= 0;
 local gAtr_Buy_Session_TotalSpent		= 0;
 local gAtr_Buy_PendingBuy				= nil;
 
+-- chain-buy sweep state (added: full auto-sweep by quantity)
+local gAtr_Buy_Chain_Auto				= false;	-- a one-click sweep is in progress
+local gAtr_Buy_Chain_Remaining			= 0;		-- auctions still wanted across the whole sweep
+local ATR_BUY_CHAIN_ALL					= 1e12;		-- sentinel target meaning "buy everything"
+
 -----------------------------------------
 
 local function Atr_Buy_IsChainChecked()
@@ -41,6 +46,28 @@ end
 local function Atr_Buy_IsBuyableData(data)
 
 	return (data and data.type == "n" and not data.yours and not data.altname and data.buyoutPrice > 0);
+
+end
+
+-----------------------------------------
+
+local function Atr_Buy_CountAllBuyable()
+
+	local currentPane = Atr_GetCurrentPane();
+
+	if (not currentPane or not currentPane.activeScan) then
+		return 0;
+	end
+
+	local total = 0;
+
+	for _, data in ipairs (currentPane.activeScan.sortedData) do
+		if (Atr_Buy_IsBuyableData(data) and data.count) then
+			total = total + data.count;
+		end
+	end
+
+	return total;
 
 end
 
@@ -167,6 +194,8 @@ local function Atr_Buy_ResetSession()
 
 	gAtr_Buy_Session_NumBought = 0;
 	gAtr_Buy_Session_TotalSpent = 0;
+	gAtr_Buy_Chain_Auto = false;
+	gAtr_Buy_Chain_Remaining = 0;
 	Atr_Buy_ClearPendingBuy();
 	Atr_Buy_UpdateSessionText();
 
@@ -207,8 +236,18 @@ local function Atr_Buy_ShowCurrentSelection()
 	gAtr_Buy_Pass			= 1;		-- - first pass
 	
 	Atr_Buy_Confirm_ItemName:SetText (gAtr_Buy_ItemName.." x"..gAtr_Buy_StackSize);
-	Atr_Buy_Confirm_Numstacks:SetNumber (1);
-	Atr_Buy_Confirm_Max_Text:SetText (ZT("max")..": "..gAtr_Buy_MaxCanBuy);
+
+	if (Atr_Buy_IsChainChecked()) then
+		-- sweep mode: "max" is everything buyable for this item, and a blank box means "all"
+		Atr_Buy_Confirm_Max_Text:SetText (ZT("max")..": "..Atr_Buy_CountAllBuyable());
+		if (not gAtr_Buy_Chain_Auto) then
+			Atr_Buy_Confirm_Numstacks:SetText ("");		-- blank = buy all (or type a limit)
+		end
+	else
+		Atr_Buy_Confirm_Numstacks:SetNumber (1);
+		Atr_Buy_Confirm_Max_Text:SetText (ZT("max")..": "..gAtr_Buy_MaxCanBuy);
+	end
+
 	Atr_Buy_UpdateSessionText();
 	
 	Atr_Buy_Part1:Show();
@@ -247,6 +286,12 @@ function Atr_Buy_ChainAdvance()
 		if (Atr_Buy_IsBuyableData(data) and (data.stackSize ~= gAtr_Buy_StackSize or data.buyoutPrice ~= gAtr_Buy_BuyoutPrice)) then
 			currentPane.currIndex = x;
 			Atr_Buy_ShowCurrentSelection();
+
+			-- auto-sweep: buy this next listing without another click, up to what's still wanted
+			if (gAtr_Buy_Chain_Auto) then
+				gAtr_Buy_NumUserWants = math.min (gAtr_Buy_Chain_Remaining, gAtr_Buy_MaxCanBuy);
+			end
+
 			return true;
 		end
 	end
@@ -261,6 +306,20 @@ function Atr_Buy_ChainContinue()
 
 	if (not Atr_Buy_IsChainChecked()) then
 		return false;
+	end
+
+	-- auto-sweep: subtract what the finished listing bought, stop when the target is met, else move on
+	if (gAtr_Buy_Chain_Auto) then
+
+		if (gAtr_Buy_NumBought and gAtr_Buy_NumBought > 0) then
+			gAtr_Buy_Chain_Remaining = gAtr_Buy_Chain_Remaining - gAtr_Buy_NumBought;
+		end
+
+		if (gAtr_Buy_Chain_Remaining <= 0) then
+			return false;		-- bought everything the user asked for
+		end
+
+		return Atr_Buy_ChainAdvance();
 	end
 
 	local currentPane = Atr_GetCurrentPane();
@@ -303,6 +362,24 @@ function Atr_ClearBuyState()
 
 	Atr_BuyState = ATR_BUY_NULL;
 	Atr_Buy_ClearPendingBuy();
+
+end
+
+-----------------------------------------
+
+function Atr_Buy_Chain_OnToggle ()
+
+	if (not Atr_Buy_Confirm_Numstacks) then
+		return;
+	end
+
+	-- ticking "Chain buy" clears the amount box so a blank field means "buy all";
+	-- un-ticking restores the normal single-selection default of 1
+	if (Atr_Buy_IsChainChecked()) then
+		Atr_Buy_Confirm_Numstacks:SetText ("");
+	else
+		Atr_Buy_Confirm_Numstacks:SetNumber (1);
+	end
 
 end
 
@@ -497,14 +574,19 @@ function Atr_Buy_CountMatches (andBuy)
 		end
 
 		if (zc.StringSame (name, gAtr_Buy_ItemName) and buyoutPrice == gAtr_Buy_BuyoutPrice and count == gAtr_Buy_StackSize) then
-			
+
 			numMatches = numMatches + 1;
-			
+
 			if (andBuy and gAtr_Buy_NumUserWants > gAtr_Buy_NumBought) then
 				PlaceAuctionBid("list", i, gAtr_Buy_BuyoutPrice);
-				
+
 				numBoughtThisPage  = numBoughtThisPage + 1;
 				gAtr_Buy_NumBought = gAtr_Buy_NumBought + 1;
+
+				-- Buy ONE auction per refresh. The server only completes the first buyout
+				-- in a batch; firing several PlaceAuctionBid in one frame makes the rest
+				-- fail with "item not found". The wait/re-query loop drives the next one.
+				break;
 			end
 		end
 
@@ -587,17 +669,30 @@ end
 function Atr_Buy_Confirm_OK ()
 
 	if (gAtr_Buy_NumUserWants == -1) then
-		local numToBuy = Atr_Buy_Confirm_Numstacks:GetNumber();
 
-		if (numToBuy > gAtr_Buy_MaxCanBuy) then
-			Atr_Error_Text:SetText (string.format (ZT("You can buy at most %d auctions"), gAtr_Buy_MaxCanBuy));
-			Atr_Error_Frame:Show ();
-			return;
+		if (Atr_Buy_IsChainChecked()) then
+
+			-- one-click sweep: blank/0 means buy everything; otherwise that many auctions total
+			local entered = Atr_Buy_Confirm_Numstacks:GetNumber();
+
+			gAtr_Buy_Chain_Auto			= true;
+			gAtr_Buy_Chain_Remaining	= (entered and entered > 0) and entered or ATR_BUY_CHAIN_ALL;
+			gAtr_Buy_NumUserWants		= math.min (gAtr_Buy_Chain_Remaining, gAtr_Buy_MaxCanBuy);
+
+		else
+
+			local numToBuy = Atr_Buy_Confirm_Numstacks:GetNumber();
+
+			if (numToBuy > gAtr_Buy_MaxCanBuy) then
+				Atr_Error_Text:SetText (string.format (ZT("You can buy at most %d auctions"), gAtr_Buy_MaxCanBuy));
+				Atr_Error_Frame:Show ();
+				return;
+			end
+
+			gAtr_Buy_NumUserWants = numToBuy;
 		end
-		
-		gAtr_Buy_NumUserWants = numToBuy;
 	end
-	
+
 	Atr_Buy_BuyNextMatch();
 	
 end
@@ -613,11 +708,19 @@ end
 -----------------------------------------
 
 function Atr_Buy_Cancel (msg)
-	
+
+	-- when a one-click sweep ends (target met / out of gold / nothing left), report the tally
+	if (gAtr_Buy_Chain_Auto and gAtr_Buy_Session_NumBought > 0) then
+		zc.msg ("Auctionator chain buy \150 bought x"..gAtr_Buy_Session_NumBought.." for "..Atr_Buy_CoinString(gAtr_Buy_Session_TotalSpent));
+	end
+
+	gAtr_Buy_Chain_Auto = false;
+	gAtr_Buy_Chain_Remaining = 0;
+
 	Atr_BuyState = ATR_BUY_NULL;
 
 	Atr_Buy_Confirm_Frame:Hide();
-	
+
 	Atr_Error_Display(msg);
 end
 
