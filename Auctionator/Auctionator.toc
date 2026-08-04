@@ -34,5 +34,6 @@ AuctionatorConflicts.lua
 AuctionatorAPI.lua
 AuctionatorConfig.lua
 AuctionatorBuy.lua
+AuctionatorQuickBuy.lua
 
 AuctionatorConfig.xml
